@@ -269,34 +269,42 @@ class TIDERun:
                 if self.bg_thresh <= ex.gt_cls_iou[pred_idx, idx] <= self.pos_thresh:
                     # This detection would have been positive if it had higher IoU with this GT
                     self._add_error(BoxError(pred, ex.gt[idx]))
+                    pred["info"]["iou"] = ex.gt_cls_iou[pred_idx, idx]
                     continue
 
                 # Test for ClassError
                 idx = ex.gt_noncls_iou[pred_idx, :].argmax()
-                if ex.gt_noncls_iou[pred_idx, idx] >= self.pos_thresh:
+                iou = ex.gt_noncls_iou[pred_idx, idx]
+                if iou >= self.pos_thresh:
                     # This detection would have been a positive if it was the correct class
                     self._add_error(ClassError(pred, ex.gt[idx]))
+                    pred["info"]["iou"] = iou
                     continue
 
                 # Test for DuplicateError
                 idx = ex.gt_used_cls[pred_idx, :].argmax()
-                if ex.gt_used_cls[pred_idx, idx] >= self.pos_thresh:
+                iou = ex.gt_used_cls[pred_idx, idx]
+                if iou >= self.pos_thresh:
                     # The detection would have been marked positive but the GT was already in use
                     suppressor = self.preds.annotations[ex.gt[idx]["matched_with"]]
                     self._add_error(DuplicateError(pred, ex.gt[idx], suppressor))
+                    pred["info"]["iou"] = iou
                     continue
 
                 # Test for BackgroundError
                 idx = ex.gt_iou[pred_idx, :].argmax()
-                if ex.gt_iou[pred_idx, idx] <= self.bg_thresh:
+                iou = ex.gt_iou[pred_idx, idx] 
+                if iou <= self.bg_thresh:
                     # This should have been marked as background
                     self._add_error(BackgroundError(pred, ex.gt[idx] if ex.gt_iou[pred_idx, idx] > 0 else {}))
+                    pred["info"]["iou"] = iou
                     continue
 
                 # A base case to catch uncaught errors
                 # self._add_error(OtherError(pred))
                 # idx is already representing the gt box with highest overlap
                 self._add_error(ClassBoxError(pred, ex.gt[idx]))
+                pred["info"]["iou"] = iou
 
         for truth in gt:
             # If the GT wasn't used in matching, meaning it's some kind of false negative
