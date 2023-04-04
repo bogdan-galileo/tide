@@ -12,7 +12,7 @@ class ClassError(Error):
     )
     short_name = "Cls"
 
-    def __init__(self, pred: dict, gt: dict, ex):
+    def __init__(self, pred: dict, gt: dict):
         self.pred = pred
         self.gt = gt
 
@@ -29,7 +29,7 @@ class BoxError(Error):
     description = "Error caused when a prediction would have been marked positive if it was localized better."
     short_name = "Loc"
 
-    def __init__(self, pred: dict, gt: dict, ex):
+    def __init__(self, pred: dict, gt: dict):
         self.pred = pred
         self.gt = gt
 
@@ -78,7 +78,7 @@ class ClassBoxError(Error):
     )
     short_name = "ClsLoc"
 
-    def __init__(self, pred: dict, gt: dict, ex):
+    def __init__(self, pred: dict, gt: dict):
         self.pred = pred
         self.gt = gt
 

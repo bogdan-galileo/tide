@@ -59,7 +59,7 @@ class TIDEExample:
         for idx, pred in enumerate(preds):
             pred["used"] = False
             pred["_idx"] = idx
-            pred["iou"] = 0
+            pred["iou"] = 0 # doesn't seemed used for anything that going into "info"
         for idx, truth in enumerate(gt):
             truth["used"] = False
             truth["usable"] = False
@@ -89,7 +89,7 @@ class TIDEExample:
                     pred_elem["used"] = True
                     gt_elem["used"] = True
                     pred_elem["matched_with"] = gt_elem["_id"]
-                    gt_elem["matched_with"] = pred_elem["_id"]
+                    gt_elem["matched_with"] = pred_elem["_id"] # for some reason this doesnt persist to the instance Data object "gt"
 
                     # Make sure this gt can't be used again
                     iou_buffer[:, gt_idx] = 0
@@ -155,13 +155,17 @@ class TIDERun:
         mode: str,
         max_dets: int,
         run_errors: bool = True,
+        use_bogdan: bool = False
     ):
+
+        self.use_bogdan = use_bogdan
+
         self.gt = gt
         self.preds = preds
 
         self.errors = []
         self.error_dict = {_type: [] for _type in TIDE._error_types}
-        self.TP_pred_id_to_gt_id = {}
+        # self.TP_pred_id_to_gt_id = {}
 
         self.ap_data = ClassedAPDataObject()
         self.qualifiers = {}
@@ -172,6 +176,7 @@ class TIDERun:
         self.pos_thresh = pos_thresh
         self.bg_thresh = bg_thresh
         self.mode = mode
+        self.det_type = "bbox" if self.mode == TIDE.BOX else "mask"
         self.max_dets = max_dets
         self.run_errors = run_errors
 
@@ -179,6 +184,13 @@ class TIDERun:
 
     def _run(self):
         """And awaaay we go"""
+
+        if self.use_bogdan:
+            print("using bogdan")
+            eval_method = self._eval_image_bogdan
+        else:
+            print("not using bogdan")
+            eval_method = self._eval_image
 
         for image in self.gt.images:
             x = self.preds.get(image)
@@ -191,7 +203,8 @@ class TIDERun:
                 ignored_classes = self.gt._get_ignored_classes(image)
                 x = [pred for pred in x if pred["class"] not in ignored_classes]
 
-            self._eval_image(x, y)
+            eval_method(x, y)
+
 
         # Store a fixed version of all the errors for testing purposes
         for error in self.errors:
@@ -214,6 +227,145 @@ class TIDERun:
     def _add_error(self, error):
         self.errors.append(error)
         self.error_dict[type(error)].append(error)
+
+    def _eval_image_bogdan(self, preds: list, gt: list):
+        
+        # Sort descending by score
+        preds.sort(key=lambda pred: -pred["score"])
+        preds = preds[:self.max_dets]
+        # self.preds = preds  # Update internally so TIDERun can update itself if :max_dets takes effect
+        detections = [x[self.det_type] for x in preds]
+        # TODO: put somewhere else, before that method for example
+
+        # IoU is [len(detections), len(gt)]
+        ious = mask_utils.iou(
+            detections, [x[self.det_type] for x in gt], [False] * len(gt)
+        )
+
+        for idx, truth in enumerate(gt):
+            if not truth["ignore"]:
+                self.ap_data.add_gt_positives(truth["class"], 1)
+                truth["used"] = False # "used" here is synonym to TP
+                truth["usable"] = False # usable as in "not missed" and matched by a Cls or Loc error
+                truth["_idx"] = idx # Should be the same as _id for gt
+
+        if len(preds) == 0:
+            # There are no predictions for this image so add all gt as missed
+            for truth in gt:
+                if not truth["ignore"]:
+                    self.ap_data.push_false_negative(truth["class"], truth["_id"])
+
+                    if self.run_errors:
+                        self._add_error(MissedError(truth))
+                        self.false_negatives[truth["class"]].append(truth)
+            return
+
+        pred_cls = np.array([x["class"] for x in preds])
+        gt_cls = np.array([x["class"] for x in gt])
+        cls_matching = pred_cls[:, None] == gt_cls[None, :]
+        cls_ious = ious * cls_matching
+        non_cls_ious = ious * ~cls_matching
+
+        for pred_idx, pred in enumerate(preds):
+            # Save the new index (in the sorted array)
+            pred["_idx"] = pred_idx
+            pred["used"] = False # Previously seems used for knowing if its an error or no and if we iterate over it on the 2nd pass (over errors)
+            pred["info"] = {}
+
+            is_duplicate = False
+
+            # pred["info"] = {"iou": pred["iou"], "used": pred["used"]}
+            # if pred["used"]:
+            #     pred["info"]["matched_with"] = pred["matched_with"]
+            #     # self.TP_pred_id_to_gt_id[pred["_id"]] = pred["matched_with"]
+
+            # if pred["used"] is not None:
+            #     self.ap_data.push(
+            #         pred["class"],
+            #         pred["_id"],
+            #         pred["score"],
+            #         pred["used"],
+            #         pred["info"],
+            #     )
+
+            # ----- ERROR DETECTION ------ #
+            # This prediction is a negative (or ignored), let's find out why
+            if self.run_errors :
+                # Test for BackgroundError if there are no gt boxes
+                if not gt:
+                    self._add_error(BackgroundError(pred))
+                    continue
+
+                # Test for TP (and flag duplicates)
+                idx_max_cls = cls_ious[pred_idx, :].argmax()
+                iou_max_cls = cls_ious[pred_idx, idx_max_cls]
+                truth_cls = gt[idx_max_cls]
+                if iou_max_cls >= self.pos_thresh:
+                    if truth_cls["used"]:
+                        # This detection would have been positive if there wasn't another one using the GT. Still, first check if it's Cls before tagging it Dup (cant be Loc since iou > thresh_foreground)
+                        is_duplicate = True
+                    else:
+                        pred["used"] = True
+                        truth_cls["used"] = True
+                        pred["matched_with"] = truth_cls["_id"]
+                        truth_cls["matched_with"] = pred["_id"]
+
+                        pred["info"]["matched_with"] = pred["matched_with"]
+                        self.ap_data.push(
+                            pred["class"],
+                            pred["_id"],
+                            pred["score"],
+                            True,
+                            pred["info"],
+                        )
+                        continue
+                # Test for Loc
+                elif iou_max_cls >= self.bg_thresh:
+                    # This detection would have been positive if it had higher IoU with this GT
+                    truth_cls["usable"] = True
+                    pred["matched_with"] = truth_cls["_id"]
+                    self._add_error(BoxError(pred, truth_cls))
+                    continue
+
+                # Test for ClassError
+                idx_max_non_cls = non_cls_ious[pred_idx, :].argmax()
+                iou_max_non_cls = non_cls_ious[pred_idx, idx_max_non_cls]
+                truth_non_cls = gt[idx_max_non_cls]
+                if iou_max_non_cls >= self.pos_thresh:
+                    truth_non_cls["usable"] = True
+                    pred["matched_with"] = truth_non_cls["_id"]
+                    self._add_error(ClassError(pred, truth_non_cls))
+                    continue
+                # Test for DuplicateError
+                elif is_duplicate:
+                    # The detection would have been marked positive but the GT was already in use
+                    pred["matched_with"] = truth_cls["_id"]
+                    suppressor = self.preds.annotations[truth_cls["matched_with"]]
+                    self._add_error(DuplicateError(pred, truth_cls, suppressor))
+                    continue
+                # Test for ClassLocError
+                elif iou_max_non_cls >= self.bg_thresh:
+                    pred["matched_with"] = truth_non_cls["_id"] # TODO: probably remove this and don't assoc with any
+                    self._add_error(ClassBoxError(pred, truth_non_cls))
+                    continue
+                              
+                # Test for BackgroundError -- we already know that no iou is above the background threshold
+                self._add_error(BackgroundError(pred))
+
+
+        for truth in gt:
+            # If the GT wasn't used in matching, meaning it's some kind of false negative
+            if not truth["ignore"] and not truth["used"]:
+                self.ap_data.push_false_negative(truth["class"], truth["_id"])
+
+                if self.run_errors:
+                    self.false_negatives[truth["class"]].append(truth)
+
+                    # The GT was completely missed, no error can correct it
+                    # Note: 'usable' is set in error.py
+                    if not truth["usable"]:
+                        self._add_error(MissedError(truth))
+
 
     def _eval_image(self, preds: list, gt: list):
 
@@ -242,7 +394,7 @@ class TIDERun:
             pred["info"] = {"iou": pred["iou"], "used": pred["used"]}
             if pred["used"]:
                 pred["info"]["matched_with"] = pred["matched_with"]
-                self.TP_pred_id_to_gt_id[pred["_id"]] = pred["matched_with"]
+                # self.TP_pred_id_to_gt_id[pred["_id"]] = pred["matched_with"]
 
             if pred["used"] is not None:
                 self.ap_data.push(
@@ -265,17 +417,19 @@ class TIDERun:
                     continue
 
                 # Test for BoxError
-                idx = ex.gt_cls_iou[pred_idx, :].argmax()
-                if self.bg_thresh <= ex.gt_cls_iou[pred_idx, idx] <= self.pos_thresh:
+                idx_max_cls = ex.gt_cls_iou[pred_idx, :].argmax()
+                iou_max_cls = ex.gt_cls_iou[pred_idx, idx_max_cls]
+                if self.bg_thresh <= iou_max_cls <= self.pos_thresh:
                     # This detection would have been positive if it had higher IoU with this GT
-                    self._add_error(BoxError(pred, ex.gt[idx], ex))
+                    self._add_error(BoxError(pred, ex.gt[idx_max_cls]))
                     continue
 
                 # Test for ClassError
-                idx = ex.gt_noncls_iou[pred_idx, :].argmax()
-                if ex.gt_noncls_iou[pred_idx, idx] >= self.pos_thresh:
+                idx_max_non_cls = ex.gt_noncls_iou[pred_idx, :].argmax()
+                iou_max_non_cls = ex.gt_noncls_iou[pred_idx, idx_max_non_cls]
+                if iou_max_non_cls >= self.pos_thresh:
                     # This detection would have been a positive if it was the correct class
-                    self._add_error(ClassError(pred, ex.gt[idx], ex))
+                    self._add_error(ClassError(pred, ex.gt[idx_max_non_cls]))
                     continue
 
                 # Test for DuplicateError
@@ -287,8 +441,9 @@ class TIDERun:
                     continue
 
                 # Test for BackgroundError
-                idx = ex.gt_iou[pred_idx, :].argmax()
-                if ex.gt_iou[pred_idx, idx] <= self.bg_thresh:
+                # idx = ex.gt_iou[pred_idx, :].argmax()
+                idx_max_cls if iou_max_cls >= iou_max_non_cls else idx_max_non_cls
+                if max(iou_max_cls, iou_max_non_cls) <= self.bg_thresh:
                     # This should have been marked as background
                     self._add_error(BackgroundError(pred))
                     continue
@@ -296,7 +451,8 @@ class TIDERun:
                 # A base case to catch uncaught errors
                 # self._add_error(OtherError(pred))
                 # idx is already representing the gt box with highest overlap
-                self._add_error(ClassBoxError(pred, ex.gt[idx], ex))
+                idx_max = idx_max_cls if iou_max_cls >= iou_max_non_cls else idx_max_non_cls
+                self._add_error(ClassBoxError(pred, ex.gt[idx_max]))
 
         for truth in gt:
             # If the GT wasn't used in matching, meaning it's some kind of false negative
@@ -509,6 +665,7 @@ class TIDE:
         mode: str = None,
         name: str = None,
         use_for_errors: bool = True,
+        use_bogdan: bool = False
     ) -> TIDERun:
         pos_thresh = self.pos_thresh if pos_threshold is None else pos_threshold
         bg_thresh = (
@@ -518,7 +675,7 @@ class TIDE:
         name = preds.name if name is None else name
 
         run = TIDERun(
-            gt, preds, pos_thresh, bg_thresh, mode, gt.max_dets, use_for_errors
+            gt, preds, pos_thresh, bg_thresh, mode, gt.max_dets, use_for_errors, use_bogdan=use_bogdan
         )
 
         if use_for_errors:

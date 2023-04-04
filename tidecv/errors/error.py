@@ -124,6 +124,7 @@ class BestGTMatch:
         self.gt = gt
 
         if self.gt["used"]:
+            # This code is currently never reached, class only created if not gt["used"]
             self.suppress = True
         else:
             self.suppress = False
