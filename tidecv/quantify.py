@@ -268,14 +268,14 @@ class TIDERun:
                 idx = ex.gt_cls_iou[pred_idx, :].argmax()
                 if self.bg_thresh <= ex.gt_cls_iou[pred_idx, idx] <= self.pos_thresh:
                     # This detection would have been positive if it had higher IoU with this GT
-                    self._add_error(BoxError(pred, ex.gt[idx], ex))
+                    self._add_error(BoxError(pred, ex.gt[idx]))
                     continue
 
                 # Test for ClassError
                 idx = ex.gt_noncls_iou[pred_idx, :].argmax()
                 if ex.gt_noncls_iou[pred_idx, idx] >= self.pos_thresh:
                     # This detection would have been a positive if it was the correct class
-                    self._add_error(ClassError(pred, ex.gt[idx], ex))
+                    self._add_error(ClassError(pred, ex.gt[idx]))
                     continue
 
                 # Test for DuplicateError
@@ -290,13 +290,13 @@ class TIDERun:
                 idx = ex.gt_iou[pred_idx, :].argmax()
                 if ex.gt_iou[pred_idx, idx] <= self.bg_thresh:
                     # This should have been marked as background
-                    self._add_error(BackgroundError(pred))
+                    self._add_error(BackgroundError(pred, ex.gt[idx] if ex.gt_iou[pred_idx, idx] > 0 else {}))
                     continue
 
                 # A base case to catch uncaught errors
                 # self._add_error(OtherError(pred))
                 # idx is already representing the gt box with highest overlap
-                self._add_error(ClassBoxError(pred, ex.gt[idx], ex))
+                self._add_error(ClassBoxError(pred, ex.gt[idx]))
 
         for truth in gt:
             # If the GT wasn't used in matching, meaning it's some kind of false negative
