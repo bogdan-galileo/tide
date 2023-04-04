@@ -63,9 +63,8 @@ class BackgroundError(Error):
     description = "Error caused when this detection should have been classified as background (IoU < 0.1)."
     short_name = "Bkg"
 
-    def __init__(self, pred: dict, gt: dict):
+    def __init__(self, pred: dict):
         self.pred = pred
-        self.gt = gt # This could be an empty dict if it doesn't overlap with any box
 
     def fix(self):
         return None
@@ -79,9 +78,8 @@ class ClassBoxError(Error):
     )
     short_name = "ClsLoc"
 
-    def __init__(self, pred: dict, gt: dict):
+    def __init__(self, pred: dict):
         self.pred = pred
-        self.gt = gt
 
     def fix(self):
         return None

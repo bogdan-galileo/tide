@@ -296,15 +296,13 @@ class TIDERun:
                 iou = ex.gt_iou[pred_idx, idx] 
                 if iou <= self.bg_thresh:
                     # This should have been marked as background
-                    self._add_error(BackgroundError(pred, ex.gt[idx] if ex.gt_iou[pred_idx, idx] > 0 else {}))
-                    pred["info"]["iou"] = iou
+                    self._add_error(BackgroundError(pred))
                     continue
 
                 # A base case to catch uncaught errors
                 # self._add_error(OtherError(pred))
                 # idx is already representing the gt box with highest overlap
-                self._add_error(ClassBoxError(pred, ex.gt[idx]))
-                pred["info"]["iou"] = iou
+                self._add_error(ClassBoxError(pred))
 
         for truth in gt:
             # If the GT wasn't used in matching, meaning it's some kind of false negative
