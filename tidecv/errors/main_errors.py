@@ -1,7 +1,4 @@
-from collections import defaultdict
-import numpy as np
-
-from .error import Error, BestGTMatch
+from .error import BestGTMatch, Error
 
 
 class ClassError(Error):
@@ -78,8 +75,9 @@ class ClassBoxError(Error):
     )
     short_name = "ClsLoc"
 
-    def __init__(self, pred: dict):
+    def __init__(self, pred: dict, gt: dict):
         self.pred = pred
+        self.gt = gt
 
     def fix(self):
         return None

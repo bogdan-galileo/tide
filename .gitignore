@@ -12,3 +12,7 @@ figs/
 
 venv/
 .DS_Store
+
+# test coverage stuff
+*.coverage
+coverage.xml

@@ -1,13 +1,15 @@
-from .data import Data
-from .ap import ClassedAPDataObject
-from .errors.main_errors import *
-from .errors.qualifiers import Qualifier, AREA
+from collections import OrderedDict, defaultdict
+from typing import List
+
+import numpy as np
+from pycocotools import mask as mask_utils
+
 from . import functions as f
 from . import plotting as P
-
-from pycocotools import mask as mask_utils
-from collections import defaultdict, OrderedDict
-import numpy as np
+from .ap import ClassedAPDataObject
+from .data import Data
+from .errors.main_errors import *
+from .errors.qualifiers import Qualifier
 
 
 class TIDEExample:
@@ -161,7 +163,6 @@ class TIDERun:
 
         self.errors = []
         self.error_dict = {_type: [] for _type in TIDE._error_types}
-        self.TP_pred_id_to_gt_id = {}
 
         self.ap_data = ClassedAPDataObject()
         self.qualifiers = {}
@@ -180,7 +181,7 @@ class TIDERun:
     def _run(self):
         """And awaaay we go"""
 
-        for image in self.gt.images:
+        for image in set(self.gt.images).union(self.preds.images):
             x = self.preds.get(image)
             y = self.gt.get(image)
 
@@ -242,7 +243,6 @@ class TIDERun:
             pred["info"] = {"iou": pred["iou"], "used": pred["used"]}
             if pred["used"]:
                 pred["info"]["matched_with"] = pred["matched_with"]
-                self.TP_pred_id_to_gt_id[pred["_id"]] = pred["matched_with"]
 
             if pred["used"] is not None:
                 self.ap_data.push(
@@ -293,7 +293,7 @@ class TIDERun:
 
                 # Test for BackgroundError
                 idx = ex.gt_iou[pred_idx, :].argmax()
-                iou = ex.gt_iou[pred_idx, idx] 
+                iou = ex.gt_iou[pred_idx, idx]
                 if iou <= self.bg_thresh:
                     # This should have been marked as background
                     self._add_error(BackgroundError(pred))
@@ -302,7 +302,8 @@ class TIDERun:
                 # A base case to catch uncaught errors
                 # self._add_error(OtherError(pred))
                 # idx is already representing the gt box with highest overlap
-                self._add_error(ClassBoxError(pred))
+                self._add_error(ClassBoxError(pred, ex.gt[idx]))
+                pred["info"]["iou"] = iou
 
         for truth in gt:
             # If the GT wasn't used in matching, meaning it's some kind of false negative
@@ -324,10 +325,15 @@ class TIDERun:
         false_neg_dict: dict = None,
         ap_data: ClassedAPDataObject = None,
         disable_errors: bool = False,
+        pred_dict: dict = None,
+        gt_dict: dict = None,
     ) -> ClassedAPDataObject:
         """Returns a ClassedAPDataObject where all errors given the condition returns True are fixed."""
         if ap_data is None:
             ap_data = self.ap_data
+
+        if gt_dict:
+            gt_ids = set.union(*gt_dict.values())
 
         gt_pos = ap_data.get_gt_positives()
         new_ap_data = ClassedAPDataObject()
@@ -339,6 +345,13 @@ class TIDERun:
 
             _id = error.get_id()
             _cls, data_point = error.original
+
+            if (
+                pred_dict
+                and gt_dict
+                and not error.is_contained_in(pred_dict.get(_cls, {}), gt_ids)
+            ):
+                continue
 
             if condition(error):
                 _cls, data_point = error.fixed
@@ -378,9 +391,20 @@ class TIDERun:
         progressive: bool = False,
         error_types: list = None,
         qual: Qualifier = None,
+        pred_dict: dict = None,
+        gt_dict: dict = None,
     ) -> dict:
         ap_data = self.ap_data
-        last_ap = self.ap
+
+        # Restrict ids if given
+        pred_dict = pred_dict if pred_dict is not None else {}
+        gt_dict = gt_dict if gt_dict is not None else {}
+        if pred_dict or gt_dict:
+            ap_data = ap_data.apply_qualifier(pred_dict, gt_dict)
+            self.qualifiers["restricted_mAP"] = ap_data.get_mAP()
+            self.qualifiers["restricted_APs"] = ap_data.get_APs()
+
+        last_ap = ap_data.get_mAP()
 
         if qual is None:
             qual = Qualifier("", None)
@@ -395,6 +419,8 @@ class TIDERun:
                 qual._make_error_func(error),
                 ap_data=ap_data,
                 disable_errors=progressive,
+                pred_dict=pred_dict,
+                gt_dict=gt_dict,
             )
 
             new_ap = _ap_data.get_mAP()
@@ -688,11 +714,46 @@ class TIDE:
 
             print()
 
-    def get_main_errors(self):
+    def get_main_errors(
+        self, run_names: List[str] = None, pred_dict: dict = None, gt_dict: dict = None
+    ):
+        """
+        Calculates the error count and impact on mAP. To calculate it on a filtered version
+        of the data, specify the indexes to keep in the dicts pred_dict and gt_dict.
+
+        args:
+        - run_names: if specified, only return the specified runs
+        - pred_dict, gt_dict: dictionaries of the form cls_id -> set of ids
+            to keep. If specified, we restrict to the dataset whose ids are
+            contained in these sets and recalculate mAP, and impact on mAP
+            based on this filtered data.
+
+        returns:
+            dictionary error_type -> impact on mAP
+
+        side effects:
+            populates self.runs[run_name].qualifiers["restricted_mAP"] with new mAP
+            and self.runs[run_name].qualifiers["restricted_APs"] with AP per class
+        """
         errors = {}
 
-        for run_name, run in self.runs.items():
-            if run_name in self.run_main_errors:
+        if run_names is None:
+            run_names = list(self.runs)
+
+        for run_name in run_names:
+            run = self.runs[run_name]
+
+            if pred_dict or gt_dict:
+                run_name = f"filtered_errors_in_run_{run_name}"
+
+                # we recalculate it every time for filtered runs since we can't index by the filter.
+                errors[run_name] = {
+                    error.short_name: value
+                    for error, value in run.fix_main_errors(
+                        pred_dict=pred_dict, gt_dict=gt_dict
+                    ).items()
+                }
+            elif run_name in self.run_main_errors:
                 errors[run_name] = self.run_main_errors[run_name]
             else:
                 errors[run_name] = {
